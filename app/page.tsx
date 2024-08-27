@@ -12,7 +12,7 @@ export default function Home() {
         <p className="text-white text-7xl font-extrabold drop-shadow-2xl mt-96">
           Welcome, Admin!
         </p>
-        <p className="text-sm text-muted mt-96">
+        <p className="text-sm text-muted mt-80">
           Kopi 82 <br />
           &copy; {new Date().getFullYear()} All rights reserved.
         </p>
