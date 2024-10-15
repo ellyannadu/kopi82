@@ -11,3 +11,11 @@ To run the program:
 npm run dev
 ```
 3. Open [http://localhost:3000](http://localhost:3000) with your browser to see the result
+
+## To Update Local
+
+1. ALWAYS git pull
+2. git checkout -b branchName
+3. git add .
+4. git commit -m "Commit message here."
+5. git push
