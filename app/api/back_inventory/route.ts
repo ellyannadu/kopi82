@@ -1,93 +1,147 @@
-// import { prisma } from "@/utils/prisma";
 import prisma from "@/lib/db";
-import { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-// GET function to fetch all data from Back Inventory model
 export async function GET(request: NextRequest) {
-  const back_inventory = await prisma.back_inventory.findMany({
-    include: {
-      item: true,
-      unit: true,
-      category: true,
-      location_shelf: true,
-      purchase_order: {
-        include: {
-          purchase_details: true
-        }
-      },
-    }
-  });
-  
-  // Process the data to include the expiry date from purchase details
-  const processedData = back_inventory.map((inventory) => {
-    const purchaseDetails = inventory.purchase_order?.purchase_details || [];
-    const expiryDate = purchaseDetails.length > 0 ? purchaseDetails[0].expiry_date : null;
-
-    return {
-      ...inventory,
-      expiry_date: expiryDate,
-    };
-  });
-
-  console.log(processedData);
-  return NextResponse.json(processedData);
-}
-
-// POST function to create a new Back Inventory
-export async function POST(request: NextRequest) {
   try {
-    const formDataArray = await request.json();
-
-    //Fetch related data from Item
-    const items = await prisma.item.findMany({
+    const backInventoryWithShelves = await prisma.back_inventory.findMany({
       include: {
-        unit: true,
-        category: true,
-        location_shelf: true,
-      }
-    });
-
-    //Create a map for quick lookup
-    const itemMap = new Map(items.map(item => [item.item_id, item]));
-
-    const created = await prisma.back_inventory.createMany({
-      data: formDataArray.map((formData: {item_id: number, stock_in_date: string | number | Date; expiry_date: string | number | Date; stock_damaged: number; stock_out_date: string | number | Date; po_id: string; pd_id: string}) => {
-        const item = itemMap.get(formData.item_id);
-        if (!item) {
-          throw new Error(`Item with ID ${formData.item_id} not found`);
-        }
-
-        return {
-          item_id: item.item_id,
-          item_stocks: 0,
-          unit_id: item.unit_id,
-          category_id: item.category_id,
-          ls_id: item.ls_id,
-          stock_in_date: formData.stock_in_date === "N/A" ? null : new Date(formData.stock_in_date),
-          stock_damaged: Number(formData.stock_damaged),
-          stock_out_date: formData.stock_out_date === "N/A" ? null : new Date(formData.stock_out_date),
-          po_id: parseInt(formData.po_id),
-          pd_id: parseInt(formData.pd_id),
-          expiry_date: formData.expiry_date === "N/A" ? null : new Date(formData.expiry_date),
-        };
-      }),
-      skipDuplicates: true,
-    });
-
-    // Fetch the newly created records from the database
-    const newBackInventory = await prisma.back_inventory.findMany({
-      where: {
-        item_id: {
-          in: formDataArray.map((item: { item_id: any; }) => item.item_id),
+        inventory_shelf: {
+          include: {
+            shelf_location: true,
+            unit: {
+              select: {
+                unit_id: true,
+                unit_name: true,
+              },
+            },
+          },
+        },
+        purchased_detail: {
+          include: {
+            item: {
+              include: {
+                unit: {
+                  select: {
+                    unit_id: true,
+                    unit_name: true,
+                  },
+                },
+                category: true,
+              },
+            },
+          },
         },
       },
     });
-
-    return NextResponse.json(newBackInventory, { status: 201 });
-
+    return NextResponse.json(backInventoryWithShelves);
   } catch (error) {
-    console.log("Error creating Back Inventory", error);
-    return NextResponse.json(error, { status: 500 });
+    console.error("Error fetching Back Inventory with Shelf Locations:", error);
+    return NextResponse.json({ error: 'Failed to fetch data' }, { status: 500 });
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { items } = await request.json();
+
+    // Validate the items array
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ error: "No items provided or invalid format" }, { status: 400 });
+    }
+
+    // Validate each item and log errors for missing fields
+    const validItems = items.filter(item => {
+      if (!item.item_id) console.error("item_id is missing for item", item);
+      if (!item.sl_id) console.error("sl_id is missing for item", item);
+      if (!item.quantity) console.error("quantity is missing for item", item);
+      if (!item.unit_name) console.error("unit_name is missing for item", item);
+
+      // Validate required fields
+      return item.item_id && item.sl_id && item.quantity && item.unit_name;
+    });
+
+    if (validItems.length !== items.length) {
+      return NextResponse.json({ error: "Some items have missing fields (item_id, sl_id, quantity, or unit_name)" }, { status: 400 });
+    }
+
+    // Process each item
+    for (const item of validItems) {
+      // Find or create the unit
+      let unitRecord = await prisma.unit.findFirst({
+        where: {
+          unit_name: {
+            equals: item.unit_name,
+            mode: 'insensitive'
+      }}});
+
+      if (!unitRecord) {
+        unitRecord = await prisma.unit.create({
+          data: { unit_name: item.unit_name },
+        });
+      }
+
+      // Update the item's unit_id with the found or created unit's ID
+      item.unit_id = unitRecord.unit_id;
+    }
+
+    // Create back_inventory entries for the selected items
+    const createdBackInventory = await prisma.back_inventory.createMany({
+      data: validItems.map(item => ({
+        pd_id: item.pd_id,
+        item_id: item.item_id,
+        stock_in_date: new Date(),
+        stock_damaged: item.stock_damaged || 0,
+        stock_used: item.stock_used || 0,
+        stock_out_date: (item.stock_damaged > 0 || item.stock_used > 0) ? new Date() : null,
+      })),
+      skipDuplicates: true,
+    });
+
+    // Fetch the newly created back_inventory entries to get the bd_id
+    const createdRecords = await prisma.back_inventory.findMany({
+      where: { pd_id: { in: validItems.map(item => item.pd_id) } },
+    });
+
+    // Create inventory_shelf entries
+    const inventoryShelfData = validItems.map(item => {
+      const correspondingBackInventory = createdRecords.find(
+        (record) => record.pd_id === item.pd_id
+      );
+      if (!correspondingBackInventory) {
+        throw new Error(`Back Inventory for item ${item.pd_id} not found`);
+      }
+
+      return {
+        bd_id: correspondingBackInventory.bd_id,
+        sl_id: Number(item.sl_id),
+        quantity: item.quantity,
+        unit_id: item.unit_id,
+      };
+    });
+
+    // Insert into the inventory_shelf table
+    await prisma.inventory_shelf.createMany({
+      data: inventoryShelfData,
+    });
+
+    // Track each entry in inventory_tracking
+    const inventoryTrackingData = inventoryShelfData.map(entry => ({
+      bd_id: entry.bd_id,
+      quantity: entry.quantity,
+      source_shelf_id: null, // Since this is a new entry, there’s no source shelf
+      destination_shelf_id: entry.sl_id,
+      unit_id: entry.unit_id,
+      date_moved: new Date(),
+      action: "added"
+    }));
+
+    await prisma.inventory_tracking.createMany({
+      data: inventoryTrackingData,
+    });
+
+    return NextResponse.json({ success: true }, { status: 201 });
+  } catch (error: any) {
+    console.error("Error creating Back Inventory:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
